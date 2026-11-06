@@ -1,80 +1,48 @@
-# backend/main.py (VERSIÓN REFACTORIZADA - CLEAN CODE Y SOLID)
 from fastapi import FastAPI, Depends, HTTPException, status
+from sqlmodel import Session, select
+from typing import List
+from backend.database import get_session, init_db
+from backend.models import Solicitud
 from pydantic import BaseModel, EmailStr, Field
-from typing import List, Optional
-from datetime import datetime
 
-app = FastAPI(title="UTN Gestor de Solicitudes Académicas", version="2.0.0")
+app = FastAPI(title="UTN - Sistema de Gestión de Solicitudes Académicas", version="2.0.0")
 
-# --- 1. DTOs (Data Transfer Objects) con validación robusta (Adiós a Primitive Obsession) ---
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
+# DTOs de entrada (Validación estricta con Pydantic)
 class SolicitudCreate(BaseModel):
-    tipo: str = Field(..., min_length=3, description="Tipo de solicitud académica")
-    descripcion: str = Field(..., min_length=10, description="Detalle ampliado de la solicitud")
-    email: EmailStr = Field(..., description="Correo electrónico institucional válido")
-    prioridad: int = Field(..., ge=1, le=3, description="Prioridad de 1 a 3")
+    tipo: str = Field(..., min_length=3)
+    descripcion: str = Field(..., min_length=10)
+    email_estudiante: EmailStr
+    prioridad: int = Field(..., ge=1, le=3)
 
-class SolicitudResponse(SolicitudCreate):
-    id: int
+class SolicitudUpdateEstado(BaseModel.Config):
     estado: str
-    fecha: str
+    responsable: str
 
-# --- 2. Capa de Repositorio (Principio de Responsabilidad Única - SRP) ---
-class SolicitudRepository:
-    def __init__(self):
-        # Simulación de persistencia segura (en un entorno real conecta a PostgreSQL con SQLModel)
-        self._storage = []
-        self._counter = 1
-
-    def save(self, data: SolicitudCreate) -> dict:
-        nueva_solicitud = {
-            "id": self._counter,
-            "tipo": data.tipo,
-            "descripcion": data.descripcion,
-            "email": data.email,
-            "prioridad": data.prioridad,
-            "estado": "PENDIENTE",
-            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        self._storage.append(nueva_solicitud)
-        self._counter += 1
-        return nueva_solicitud
-
-    def get_all(self) -> List[dict]:
-        return self._storage
-
-# --- 3. Capa de Servicios (Lógica de Negocio aislada) ---
-class NotificacionService:
-    @staticmethod
-    def enviar_notificacion(email: str, tipo: str):
-        # Abstracción limpia del servicio de correo (Evita acoplar un print en el controlador)
-        print(f"[LOG NOTIFICACIÓN] Enviando correo electrónico a {email}: Su solicitud de tipo '{tipo}' fue registrada con éxito.")
-
-class SolicitudService:
-    def __init__(self, repository: SolicitudRepository = Depends()):
-        self.repository = repository
-
-    def procesar_nueva_solicitud(self, data: SolicitudCreate) -> dict:
-        # Lógica de negocio encapsulada y validada por Pydantic
-        solicitud_creada = self.repository.save(data)
-        
-        # Disparar notificación de forma desacoplada
-        NotificacionService.enviar_notificacion(solicitud_creada["email"], solicitud_creada["tipo"])
-        
-        return solicitud_creada
-
-# --- 4. Capa de Enrutamiento / Controladores (Limpios y desacoplados) ---
-@app.post("/api/v1/solicitudes", response_model=dict, status_code=status.HTTP_201_CREATED)
-def crear_solicitud(payload: SolicitudCreate, service: SolicitudService = Depends()):
+@app.post("/api/v1/solicitudes", response_model=Solicitud, status_code=status.HTTP_201_CREATED)
+def crear_solicitud(payload: SolicitudCreate, session: Session = Depends(get_session)):
     try:
-        resultado = service.procesar_nueva_solicitud(payload)
-        return {"status": "success", "data": resultado}
-    except Exception as e:
-        # Manejo de errores profesional (Sin filtrar trazas internas del sistema)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Ocurrió un error interno al procesar la solicitud académica."
+        nueva_solicitud = Solicitud(
+            tipo=payload.tipo,
+            descripcion=payload.descripcion,
+            email_estudiante=payload.email_estudiante,
+            prioridad=payload.prioridad
         )
+        session.add(nueva_solicitud)
+        session.commit()
+        session.refresh(nueva_solicitud)
+        
+        # Simulación de notificación desacoplada
+        print(f"[LOG NOTIFICACIÓN] Enviando correo a {nueva_solicitud.email_estudiante}: Solicitud registrada con éxito.")
+        return nueva_solicitud
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Error interno al procesar la solicitud en base de datos.")
 
-@app.get("/api/v1/solicitudes", response_model=List[dict])
-def listar_solicitudes(service: SolicitudService = Depends()):
-    return service.repository.get_all()
+@app.get("/api/v1/solicitudes", response_model=List[Solicitud])
+def listar_solicitudes(session: Session = Depends(get_session)):
+    solicitudes = session.exec(select(Solicitud)).all()
+    return solicitudes
